@@ -1,0 +1,91 @@
+name: Crystal PDF isolated frontend validation
+
+# Public standard runner validation. No artifacts, cache, secrets or deployment.
+# Keep this workflow outside the upstream contribution PR.
+on:
+  push:
+    branches: [validation/mobile-landing]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - source: baseline
+            ref: 0df8ff502800c0919484b05d6915e180c074821a
+          - source: patch
+            ref: c1f43c803dfc351b5e59534e07511b94eef2979a
+    defaults:
+      run:
+        shell: bash
+        working-directory: frontend
+    steps:
+      # Official actions README versions verified in the integrated browser.
+      - name: Check out selected source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Use Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Identify source and verify unmodified dependency manifests
+        run: |
+          mkdir -p validation
+          git rev-parse HEAD | tee validation/source-commit.txt
+          printf '%s  %s\n' '57f9bcee28e34929975816a0ddcae4439a79bd18a66b548bb6e1aa7b45087f2e' 'package.json' '68c4d6903063a130313b9adfbdd33e7379ed926f41f91a442356a3e4c9d80703' 'package-lock.json' | sha256sum -c -
+          sha256sum package.json package-lock.json src/pages/LandingPage.tsx src/index.css src/App.tsx src/main.tsx vite.config.ts vitest.config.ts tailwind.config.js postcss.config.js > validation/source-files.sha256
+          node --version | tee validation/node-version.txt
+          npm --version | tee validation/npm-version.txt
+          if [ '${{ matrix.source }}' = 'baseline' ]; then
+            test "$(git rev-parse HEAD)" = '0df8ff502800c0919484b05d6915e180c074821a'
+          fi
+          printf 'Source: %s\nCommit: %s\n' '${{ matrix.source }}' "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install exact lockfile without install lifecycle scripts
+        id: install
+        run: |
+          set +e
+          npm ci --ignore-scripts --no-audit --no-fund > validation/npm-ci.log 2>&1
+          install_exit=$?
+          set -e
+          cat validation/npm-ci.log
+          printf '%s\n' "$install_exit" > validation/npm-ci.exit
+          printf 'npm ci exit: %s\n' "$install_exit" >> "$GITHUB_STEP_SUMMARY"
+          exit "$install_exit"
+
+      - name: Build and run all frontend tests with actual exit codes
+        if: always() && steps.install.outcome == 'success'
+        run: |
+          # npm run build intentionally runs the reviewed prebuild lifecycle:
+          # copy-pdfjs-worker copies the locked package's local worker into public/.
+          # Install lifecycle scripts remain disabled in the preceding step.
+          set +e
+          npm run build > validation/build.log 2>&1
+          build_exit=$?
+          npm test -- --reporter=verbose > validation/test.log 2>&1
+          test_exit=$?
+          set -e
+          cat validation/build.log
+          cat validation/test.log
+          printf '%s\n' "$build_exit" > validation/build.exit
+          printf '%s\n' "$test_exit" > validation/test.exit
+          printf 'Build exit: %s\nTests exit: %s\n' "$build_exit" "$test_exit" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$build_exit" -ne 0 ] || [ "$test_exit" -ne 0 ]; then
+            exit 1
+          fi
+
+      # No artifact upload: root chose logs/summaries only after billing review.
+      # No secrets, cache, deployment, release, publication, or write permissions.
